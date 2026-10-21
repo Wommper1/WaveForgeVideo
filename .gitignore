@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Build output
+/build/
+/dist/
+*.spec
+
+# Runtime files (the app keeps these in %APPDATA%\WaveForgeVideo, but a portable run may create them here)
+config.json
+logs/
+*.log
+*.part.*
+
+# Editors and OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store

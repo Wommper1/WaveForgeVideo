@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Tag must match the app version
+        shell: pwsh
+        run: |
+          $actual = (python waveforge_video.py --version).Trim()
+          $expected = "WaveForge Video " + "${{ github.ref_name }}".TrimStart("v")
+          if ($actual -ne $expected) { throw "Tag ${{ github.ref_name }} does not match the app ('$actual')" }
+
+      - name: Install FFmpeg
+        run: choco install ffmpeg --no-progress -y
+        continue-on-error: true
+      - run: python -m pip install pytest pyinstaller
+      - run: python -m pytest -q
+
+      - name: Build
+        run: python -m PyInstaller --noconfirm --clean --windowed --name WaveForgeVideo waveforge_video.py
+
+      - name: Package
+        shell: pwsh
+        run: |
+          Copy-Item README.md, LICENSE, CHANGELOG.md dist\WaveForgeVideo\
+          Compress-Archive -Path dist\WaveForgeVideo -DestinationPath "WaveForgeVideo-${{ github.ref_name }}-windows.zip"
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${{ github.ref_name }}" "WaveForgeVideo-${{ github.ref_name }}-windows.zip" --title "WaveForge Video ${{ github.ref_name }}" --generate-notes
