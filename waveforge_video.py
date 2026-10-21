@@ -5,7 +5,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 # Settings and logs live in the user's profile, so the app also works from a read-only folder.

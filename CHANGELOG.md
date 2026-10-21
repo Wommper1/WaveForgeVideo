@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.1.0] - 2026-10-21
 
 ### Added
 - Still-frame previews: the pictures at the trim start and end are shown above the timeline, and hovering the timeline shows a thumbnail of that moment. They follow the Rotate setting, resize with the window, and are fetched one at a time so fast mouse movement never piles up FFmpeg runs.
