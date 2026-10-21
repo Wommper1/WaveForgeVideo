@@ -177,16 +177,28 @@ def test_opening_another_file_replaces_the_frames(app, monkeypatch, clips):
     assert "image" in item_types(app.frame_cv["start"])
 
 
-def test_frames_are_fetched_at_a_size_that_fits_the_panels(app, monkeypatch, clips):
+def test_preview_size_follows_the_width_of_the_panels(app, monkeypatch, clips):
     open_clip(app, monkeypatch, clips["video"])
     assert pump(app, lambda: {"start", "end"} <= set(app.shown))
-    normal = app.preview_box
-    app.geometry("1600x900")
-    assert pump(app, lambda: app.preview_box[0] > normal[0])
-    assert app.preview_box == (400, 225)                    # capped
-    assert pump(app, lambda: app.shown["start"][3:] == (400, 225))
+    # Driven directly: how big a window can get depends on the screen, which differs between machines.
+    for width, expected in ((1000, (400, 225)),   # capped
+                            (304, (304, 171)),
+                            (100, (120, 67))):    # floor
+        app._frame_panel_resized("start", width)
+        assert app.preview_box == expected
+        assert int(app.frame_cv["start"].cget("height")) == expected[1]
+    assert pump(app, lambda: app.shown["start"][3:] == app.preview_box)  # frames are re-fetched at the new size
+
+
+def test_shrinking_the_window_shrinks_the_previews(app, monkeypatch, clips):
+    open_clip(app, monkeypatch, clips["video"])
+    assert pump(app, lambda: {"start", "end"} <= set(app.shown))
+    before_width, before_box = app.winfo_width(), app.preview_box
     app.geometry("1050x700")
-    assert pump(app, lambda: app.preview_box[0] < normal[0])
+    pump(app, timeout=1.0)
+    if app.winfo_width() >= before_width:
+        pytest.skip("the window is already as small as this screen allows")
+    assert pump(app, lambda: app.preview_box[0] < before_box[0])
     width, height = app.preview_box
     assert abs(width / height - 16 / 9) < 0.05
     assert app.frame_cv["start"].winfo_width() >= width     # the panel really is wide enough for what was requested
