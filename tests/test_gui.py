@@ -45,13 +45,20 @@ def pump(window, until=None, timeout=15.0):
 
 @pytest.fixture
 def app(ffmpeg_tools, monkeypatch):
-    try:
-        window = wf.App()
-    except tk.TclError as e:
-        # Only skip when Tk itself cannot run here; any other TclError is a bug in the window code.
-        if "display" in str(e) or "init.tcl" in str(e):
-            pytest.skip(f"Tk is not usable here: {e}")
-        raise
+    window = None
+    for attempt in range(3):
+        try:
+            window = wf.App()
+            break
+        except tk.TclError as e:
+            # Tk itself failing to start (no display, or its script library briefly unreadable on a busy CI
+            # runner) is an environment problem: retry, then skip. Any other TclError is a bug in the window code.
+            if "display" not in str(e) and "Can't find a usable" not in str(e):
+                raise
+            last_error = e
+            time.sleep(1.5)
+    if window is None:
+        pytest.skip(f"Tk is not usable here: {last_error}")
     try:
         window.attributes("-alpha", 0.0)  # fully transparent, so nothing flashes on screen while testing
     except tk.TclError:
