@@ -1,5 +1,5 @@
 from __future__ import annotations
-import array, collections, json, os, queue, shutil, signal, subprocess, sys, threading, time
+import array, base64, collections, json, os, queue, shutil, signal, subprocess, sys, threading, time
 from dataclasses import dataclass
 from pathlib import Path
 import tkinter as tk
@@ -25,6 +25,8 @@ MEDIA_FILETYPES = [("Video and audio"," ".join("*"+e for e in sorted(VIDEO_EXTS|
 _NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
 # Outside Windows an export runs in its own process group so cancelling can stop all of it.
 _OWN_GROUP = {} if os.name == "nt" else {"start_new_session": True}
+
+ROTATE_FILTERS = {"90° clockwise": "transpose=1", "90° counterclockwise": "transpose=2", "180°": "hflip,vflip"}
 
 @dataclass
 class MediaInfo:
@@ -157,6 +159,70 @@ def fmt_time(t):
     t=int(max(0,t));h,rem=divmod(t,3600);m,s=divmod(rem,60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
+def preview_time(t, duration):
+    """Clamp `t` to a moment that has a frame; the very end of a file does not."""
+    t=max(0.0,t)
+    return min(t,max(0.0,duration-0.05)) if duration>0 else t
+
+def grab_frame(ffmpeg, path, t, rotate="None", box=(320,180), timeout=30):
+    """PNG bytes of the video frame at `t` seconds, shrunk to fit `box` and rotated like the export; b"" if none."""
+    vf=([ROTATE_FILTERS[rotate]] if rotate in ROTATE_FILTERS else [])+[f"scale={box[0]}:{box[1]}:force_original_aspect_ratio=decrease"]
+    cmd=[ffmpeg,"-v","error","-ss",f"{max(0.0,t):.3f}","-i",path,"-map","0:v:0","-frames:v","1","-an","-sn",
+         "-vf",",".join(vf),"-pix_fmt","rgb24","-f","image2pipe","-c:v","png","-"]
+    try:
+        p=subprocess.run(cmd,capture_output=True,timeout=timeout,**_NO_WINDOW)
+    except (OSError,subprocess.TimeoutExpired):
+        return b""
+    return p.stdout if p.returncode==0 and p.stdout.startswith(b"\x89PNG") else b""
+
+class FrameLoader:
+    """Fetches preview frames one at a time on a background thread.
+
+    Each slot ("start", "end", "hover") keeps only its newest request, so dragging the mouse never
+    builds up a backlog of ffmpeg runs, and frames already fetched come from a small cache.
+    `grab(*key)` returns PNG bytes; `deliver(slot, ticket, key, data)` is called from either thread.
+    """
+    def __init__(self, grab, deliver, cache_size=64):
+        self._grab=grab;self._deliver=deliver;self._cache_size=cache_size
+        self._cache=collections.OrderedDict()
+        self._latest={};self._count=0
+        self._lock=threading.Lock()
+        self._queue=queue.Queue()
+        threading.Thread(target=self._loop,daemon=True).start()
+
+    def request(self, slot, key):
+        """Ask for the frame described by `key` (a tuple of grab arguments); returns the request's ticket."""
+        with self._lock:
+            self._count+=1;n=self._count;self._latest[slot]=n
+            data=self._cache.get(key)
+            if data is not None:self._cache.move_to_end(key)
+        if data is not None:self._deliver(slot,n,key,data)
+        else:self._queue.put((slot,n,key))
+        return n
+
+    def cancel(self, slot):
+        """Make any request still pending or running for `slot` stale."""
+        with self._lock:
+            self._count+=1;self._latest[slot]=self._count
+
+    def current(self, slot, ticket):
+        return self._latest.get(slot)==ticket
+
+    def clear_cache(self):
+        with self._lock:self._cache.clear()
+
+    def _loop(self):
+        while True:
+            slot,n,key=self._queue.get()
+            if not self.current(slot,n):continue
+            try:data=self._grab(*key)
+            except Exception:data=b""  # one bad frame must not stop the loader
+            if data:
+                with self._lock:
+                    self._cache[key]=data
+                    while len(self._cache)>self._cache_size:self._cache.popitem(last=False)
+            self._deliver(slot,n,key,data)
+
 def detect_encoders(ffmpeg):
     try:
         txt=run_capture([ffmpeg,"-hide_banner","-encoders"],timeout=15)
@@ -262,6 +328,13 @@ class App(tk.Tk):
         self.wave:list|None=None  # None while the waveform is still being computed
         self.current_job:Job|None=None
         self.events=queue.Queue()
+        self.frames=FrameLoader(lambda path,t,rot,w,h:grab_frame(self.ffmpeg,path,t,rot,(w,h)),
+                                lambda slot,n,key,data:self.events.put(("frame",slot,n,key,data)))
+        self.shown={}  # slot -> key of the frame on screen
+        self.preview_box=(300,169)  # size frames are fetched at for the START / END panels
+        self._frame_content={}  # slot -> ("img", PhotoImage) or ("text", message); also keeps images alive
+        self._hover_x=None;self._hover_img=None
+        self._preview_after=None;self._hover_after=None
 
         self._style()
         self._build()
@@ -322,14 +395,28 @@ class App(tk.Tk):
         ttk.Label(edit,text="Rotate").pack(anchor="w",padx=8)
         ttk.Combobox(edit,textvariable=self.rotate,state="readonly",values=["None","90° clockwise","90° counterclockwise","180°"]).pack(fill="x",padx=8,pady=(2,8))
 
+        shots=ttk.Labelframe(center,text="FRAMES AT THE TRIM POINTS"); shots.pack(fill="x",pady=4)
+        self.frame_cv={};self.frame_cap={}
+        for col,slot in enumerate(("start","end")):
+            shots.columnconfigure(col,weight=1,uniform="shots")
+            cell=ttk.Frame(shots); cell.grid(row=0,column=col,sticky="ew",padx=8,pady=8)
+            self.frame_cap[slot]=ttk.Label(cell,text=slot.upper(),foreground="#8fa1ba"); self.frame_cap[slot].pack(anchor="w")
+            cv=tk.Canvas(cell,bg="#070b11",highlightthickness=0,width=10,height=self.preview_box[1]); cv.pack(fill="x",pady=(2,0))
+            cv.bind("<Configure>",lambda e,s=slot:self._frame_panel_resized(s,e.width))
+            self.frame_cv[slot]=cv
+            self._frame_content[slot]=("text","Open a video")
+
         preview=ttk.Labelframe(center,text="TIMELINE"); preview.pack(fill="both",expand=True,pady=4)
         self.canvas=tk.Canvas(preview,bg="#070b11",highlightthickness=0)
         self.canvas.pack(fill="both",expand=True,padx=8,pady=8)
         self.canvas.bind("<Configure>",lambda e:self.draw_timeline())
         self.canvas.bind("<Button-1>",lambda e:self.timeline_click(e,"start"))
         self.canvas.bind("<Button-3>",lambda e:self.timeline_click(e,"end"))
+        self.canvas.bind("<Motion>",self._on_hover)
+        self.canvas.bind("<Leave>",self._on_leave)
         for var in (self.trim_start,self.trim_end):
-            var.trace_add("write",lambda *a:self.draw_timeline())
+            var.trace_add("write",lambda *a:(self.draw_timeline(),self._schedule_previews()))
+        self.rotate.trace_add("write",lambda *a:self._schedule_previews())
 
         trans=ttk.Frame(center); trans.pack(fill="x",pady=6)
         ttk.Button(trans,text="▶ Play in default player",command=self.preview_external).pack(side="left",padx=3)
@@ -420,8 +507,11 @@ class App(tk.Tk):
         if self.media.audio_codec and self.ffmpeg:
             ffmpeg=self.ffmpeg
             threading.Thread(target=lambda:self.events.put(("waveform",path,compute_waveform(ffmpeg,path))),daemon=True).start()
+        self.frames.clear_cache();self.frames.cancel("hover")  # the file may have changed since it was last opened
+        self._hover_img=None;self.shown.clear()
         self.trim_start.set("0");self.trim_end.set("")
         self.draw_timeline()
+        self._refresh_previews()
         self.status.config(text="Media loaded")
 
     def _trim_values(self):
@@ -456,7 +546,7 @@ class App(tk.Tk):
                 amp=max(1,self.wave[min(n-1,int(x/w*n))]*h*.36)
                 c.create_line(x,mid-amp,x,mid+amp,fill="#49cfe2")
         c.create_text(12,15,text=f"{Path(self.media.path).name}   {dur:.1f}s",anchor="w",fill="#b9c8dc")
-        c.create_text(w-12,15,text="click: set start   right-click: set end",anchor="e",fill="#5d6c85",font=("Segoe UI",9))
+        c.create_text(w-12,15,text="click: set start   right-click: set end   hover: preview frame",anchor="e",fill="#5d6c85",font=("Segoe UI",9))
         if dur>0:
             step=next((s for s in (1,2,5,10,15,30,60,120,300,600,900,1800,3600,7200) if dur/s<=max(1,w/80)),7200)
             for t in range(0,int(dur)+1,step):
@@ -469,6 +559,7 @@ class App(tk.Tk):
             c.create_rectangle(x2,0,w,h,fill="#05070a",stipple="gray50",outline="")
             c.create_rectangle(x1,0,x2,h,outline="#5de7ff",width=2)
             self.time_lbl.config(text=f"{fmt_time(a)} – {fmt_time(b)}   /   {fmt_time(dur)}")
+        self._draw_hover()
 
     def timeline_click(self,e,which):
         if not self.media or not self.media.duration:return
@@ -484,6 +575,96 @@ class App(tk.Tk):
             except ValueError:start=0.0
             if t>start:self.trim_end.set(f"{t:.2f}")
             else:self.status.config(text="Trim end must be after trim start")
+
+    # ---- frame previews: START / END panels and the thumbnail under the cursor
+
+    def _can_preview(self):
+        return bool(self.media and self.media.video_codec and self.ffmpeg)
+
+    def _schedule_previews(self):
+        if self._preview_after:self.after_cancel(self._preview_after)
+        self._preview_after=self.after(200,self._refresh_previews)  # wait for typing to settle
+
+    def _refresh_previews(self):
+        if self._preview_after:self.after_cancel(self._preview_after)
+        self._preview_after=None
+        if not self._can_preview():
+            msg="Open a video" if not self.media else "No video track" if not self.media.video_codec else "FFmpeg not found"
+            for slot in ("start","end"):
+                self.frames.cancel(slot);self.shown.pop(slot,None)
+                self.frame_cap[slot].config(text=slot.upper());self._set_frame(slot,("text",msg))
+            return
+        a,b=self._trim_values()
+        bw,bh=self.preview_box
+        for slot,point,t in (("start",a,a),("end",b,max(a,b-0.04))):  # the last frame kept is just before the end point
+            self.frame_cap[slot].config(text=f"{slot.upper()}  {point:.2f}s")
+            self.frames.request(slot,(self.media.path,round(preview_time(t,self.media.duration),2),self.rotate.get(),bw,bh))
+
+    def _set_frame(self,slot,content):
+        self._frame_content[slot]=content
+        self._draw_frame(slot)
+
+    def _draw_frame(self,slot):
+        cv=self.frame_cv[slot];cv.delete("all")
+        w=max(10,cv.winfo_width());h=max(10,cv.winfo_height())
+        kind,value=self._frame_content[slot]
+        if kind=="img":cv.create_image(w/2,h/2,image=value)
+        else:cv.create_text(w/2,h/2,text=value,fill="#71819a",font=("Segoe UI",11))
+
+    def _frame_panel_resized(self,slot,width):
+        self._draw_frame(slot)
+        if slot!="start":return
+        bw=min(400,max(120,width))//8*8;bh=bw*9//16
+        if abs(bw-self.preview_box[0])>=8:
+            self.preview_box=(bw,bh)
+            for cv in self.frame_cv.values():cv.configure(height=bh)
+            self._schedule_previews()
+
+    def _frame_ready(self,slot,key,data):
+        self.shown[slot]=key
+        try:img=tk.PhotoImage(data=base64.b64encode(data)) if data else None
+        except tk.TclError:img=None
+        if slot=="hover":
+            self._hover_img=img;self._draw_hover()
+        else:
+            self._set_frame(slot,("img",img) if img else ("text","No frame at this time"))
+
+    def _on_hover(self,e):
+        if not self._can_preview() or not self.media.duration:return
+        self._hover_x=e.x
+        self._draw_hover()
+        if self._hover_after:self.after_cancel(self._hover_after)
+        self._hover_after=self.after(100,self._request_hover)  # only fetch once the mouse slows down
+
+    def _hover_time(self):
+        w=max(1,self.canvas.winfo_width())
+        return min(self.media.duration,max(0.0,self._hover_x/w*self.media.duration))
+
+    def _request_hover(self):
+        self._hover_after=None
+        if self._hover_x is None or not self._can_preview():return
+        t=preview_time(round(self._hover_time()*4)/4,self.media.duration)  # quarter-second steps keep the cache useful
+        self.frames.request("hover",(self.media.path,t,self.rotate.get(),160,90))
+
+    def _on_leave(self,e):
+        if self._hover_after:self.after_cancel(self._hover_after);self._hover_after=None
+        self._hover_x=None;self._hover_img=None
+        self.frames.cancel("hover");self.shown.pop("hover",None)
+        self.canvas.delete("hover")
+
+    def _draw_hover(self):
+        c=self.canvas;c.delete("hover")
+        if self._hover_x is None or not self.media or not self.media.duration:return
+        w=max(10,c.winfo_width());h=max(10,c.winfo_height())
+        x=min(max(self._hover_x,0),w);t=self._hover_time()
+        c.create_line(x,0,x,h,fill="#8fa1ba",dash=(2,3),tags="hover")
+        img=self._hover_img
+        iw,ih=(img.width(),img.height()) if img else (0,0)
+        cx=min(max(x,iw/2+6),w-iw/2-6)  # keep the thumbnail inside the canvas
+        if img:
+            c.create_rectangle(cx-iw/2-2,28,cx+iw/2+2,30+ih+2,fill="#0a111a",outline="#5de7ff",tags="hover")
+            c.create_image(cx,30,image=img,anchor="n",tags="hover")
+        c.create_text(cx,30+ih+(12 if img else 4),text=f"{fmt_time(t)}.{int(t%1*10)}",fill="#eef4ff",font=("Segoe UI",9,"bold"),tags="hover")
 
     def preview_external(self):
         if not self.media:return
@@ -570,10 +751,7 @@ class App(tk.Tk):
         has_video=bool(self.media.video_codec) and not audio_only
         filters=[]
         if has_video:
-            rot=self.rotate.get()
-            if rot=="90° clockwise":filters.append("transpose=1")
-            elif rot=="90° counterclockwise":filters.append("transpose=2")
-            elif rot=="180°":filters.append("hflip,vflip")
+            if self.rotate.get() in ROTATE_FILTERS:filters.append(ROTATE_FILTERS[self.rotate.get()])
 
             res=self.resolution.get()
             dims={"720p":(1280,720),"1080p":(1920,1080),"1440p":(2560,1440),"4K UHD (3840×2160)":(3840,2160)}
@@ -711,6 +889,8 @@ class App(tk.Tk):
                 elif e[0]=="encoders":
                     if e[1]==self._enc_gen:
                         self.encoders|=e[2];self._show_engine()
+                elif e[0]=="frame":
+                    if self.frames.current(e[1],e[2]):self._frame_ready(e[1],e[3],e[4])
                 elif e[0]=="waveform":
                     if self.media and e[1]==self.media.path:
                         self.wave=e[2];self.draw_timeline()

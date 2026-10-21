@@ -2,6 +2,7 @@
 
 import json
 import shutil
+import struct
 import subprocess
 import tempfile
 import threading
@@ -39,6 +40,11 @@ def samples(ffmpeg_tools):
     s["tone"] = make_sample(ffmpeg, root / "tone.wav", *tone, "-t", "2")
     s["long"] = make_sample(ffmpeg, root / "long.mp4", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:duration=40",
                             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p")
+    blocks = []
+    for colour in ("red", "lime", "blue"):
+        blocks += ["-f", "lavfi", "-i", f"color=c={colour}:s=640x360:r=25:d=1"]
+    s["rgb"] = make_sample(ffmpeg, root / "rgb.mp4", *blocks, "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]",
+                           "-map", "[v]", "-c:v", "libx264", "-pix_fmt", "yuv420p")
     try:
         s["tenbit"] = make_sample(ffmpeg, root / "tenbit.mp4", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25:duration=2",
                                   "-c:v", "libx265", "-pix_fmt", "yuv420p10le")
@@ -292,3 +298,80 @@ def test_cancel_stops_ffmpeg_and_removes_partial_file(make_app, tools, samples, 
             done.append(e)
     assert done and done[0][1] is False and done[0][2] == "Cancelled"
     assert not out.exists() and not Path(job.work_path).exists()
+
+
+# ------------------------------------------------------------------- frame previews
+
+def png_size(png):
+    return struct.unpack(">II", png[16:24])  # width, height from the IHDR chunk
+
+
+def centre_colour(ffmpeg, png):
+    """RGB of the middle pixel of a PNG, decoded by ffmpeg itself."""
+    raw = subprocess.run([ffmpeg, "-v", "error", "-f", "image2pipe", "-c:v", "png", "-i", "-", "-frames:v", "1",
+                          "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], input=png, capture_output=True, check=True).stdout
+    w, h = png_size(png)
+    mid = ((h // 2) * w + w // 2) * 3
+    return tuple(raw[mid:mid + 3])
+
+
+@pytest.mark.parametrize("t,channel", [(0.5, 0), (1.2, 1), (2.4, 2)])
+def test_grab_frame_comes_from_the_requested_moment(tools, samples, t, channel):
+    # Red for 0-1 s, green for 1-2 s, blue for 2-3 s. Second 1.2 is not a keyframe, so a keyframe-only
+    # seek would wrongly show red.
+    png = wf.grab_frame(tools[0], str(samples["rgb"]), t)
+    assert png.startswith(b"\x89PNG")
+    colour = centre_colour(tools[0], png)
+    assert colour[channel] > 200 and all(colour[i] < 80 for i in range(3) if i != channel), colour
+
+
+def test_grab_frame_fits_the_box_and_keeps_proportions(tools, samples):
+    w, h = png_size(wf.grab_frame(tools[0], str(samples["main"]), 1.0, "None", (300, 169)))  # 640x360 source
+    assert (w, h) == (300, 169) or (w <= 300 and h <= 169 and 300 in (w, h * 16 // 9))
+    assert abs(w / h - 640 / 360) < 0.02
+
+
+def test_grab_frame_follows_the_rotation_setting(tools, samples):
+    upright = png_size(wf.grab_frame(tools[0], str(samples["main"]), 1.0, "None", (300, 300)))
+    turned = png_size(wf.grab_frame(tools[0], str(samples["main"]), 1.0, "90° clockwise", (300, 300)))
+    assert upright[0] > upright[1]
+    assert turned[0] < turned[1]
+    assert turned[1] == 300
+
+
+def test_grab_frame_handles_unicode_paths_and_ten_bit_sources(tools, samples):
+    assert wf.grab_frame(tools[0], str(samples["main"]), 0.5).startswith(b"\x89PNG")  # file name has non-ASCII characters
+    if samples["tenbit"] is not None:
+        assert wf.grab_frame(tools[0], str(samples["tenbit"]), 0.5).startswith(b"\x89PNG")
+
+
+def test_last_frame_is_available_but_not_past_the_end(tools, samples):
+    info = wf.probe_media(tools[1], str(samples["rgb"]))
+    last = wf.preview_time(info.duration, info.duration)
+    png = wf.grab_frame(tools[0], str(samples["rgb"]), last)
+    assert png and centre_colour(tools[0], png)[2] > 200   # still blue
+    assert wf.grab_frame(tools[0], str(samples["rgb"]), 99.0) == b""
+
+
+def test_grab_frame_is_empty_for_audio_only_files(tools, samples):
+    assert wf.grab_frame(tools[0], str(samples["tone"]), 0.5) == b""
+
+
+def test_frame_loader_with_real_ffmpeg(tools, samples):
+    got = []
+    done = threading.Event()
+
+    def deliver(slot, ticket, key, data):
+        got.append((slot, key, data))
+        if len(got) == 3:
+            done.set()
+
+    loader = wf.FrameLoader(lambda path, t, rot, w, h: wf.grab_frame(tools[0], path, t, rot, (w, h)), deliver)
+    path = str(samples["rgb"])
+    loader.request("start", (path, 0.5, "None", 160, 90))
+    loader.request("end", (path, 2.4, "None", 160, 90))
+    loader.request("hover", (path, 1.25, "None", 160, 90))
+    assert done.wait(60)
+    by_slot = {slot: data for slot, _, data in got}
+    assert all(d.startswith(b"\x89PNG") for d in by_slot.values())
+    assert [max(range(3), key=centre_colour(tools[0], by_slot[s]).__getitem__) for s in ("start", "hover", "end")] == [0, 1, 2]

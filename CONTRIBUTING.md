@@ -15,7 +15,7 @@ The app is a single file, [waveforge_video.py](waveforge_video.py), and uses onl
 ## Tests
 
 - `tests/test_core.py` and `tests/test_utility_functions.py` need neither FFmpeg nor a display.
-- `tests/test_ffmpeg_integration.py` runs real exports and is skipped when FFmpeg is not installed. Install it with `winget install Gyan.FFmpeg` to run it locally.
+- `tests/test_ffmpeg_integration.py` runs real exports and `tests/test_gui.py` drives the real window (kept invisible); both are skipped when FFmpeg or a display is missing. Install FFmpeg with `winget install Gyan.FFmpeg` to run them locally.
 - Tests must not touch your real settings; `conftest.py` redirects them to a temporary folder automatically.
 
 When you fix a bug, add a test that fails without the fix.

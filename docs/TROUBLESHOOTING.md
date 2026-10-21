@@ -31,6 +31,14 @@ Your FFmpeg build or GPU does not provide a working hardware encoder. Exports us
 
 "No audio track" means the file has no sound. "Waveform unavailable" means FFmpeg could not decode the audio; exporting video may still work.
 
+## "No frame at this time" in the preview panels
+
+FFmpeg could not decode a picture at that moment, which can happen with damaged files or the last fraction of a second of some videos. Move the trim point a little earlier. Exporting may still work; the preview is only a guide.
+
+## The preview frames are slow or stay empty
+
+Each frame is decoded on demand, so very large or heavily compressed files (4K HEVC, for example) take a second or more per frame. Only the newest request is kept, so the panels catch up as soon as you stop moving the mouse. If they never fill in, check the ENGINE panel to see that FFmpeg was found.
+
 ## The exported file is large, small, or looks soft
 
 Use *Quality* to trade size against detail. Upscaling cannot create detail that was not in the source.

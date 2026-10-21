@@ -8,6 +8,7 @@ A small Windows desktop app for trimming, converting, rotating and upscaling vid
 
 - **Open almost anything** FFmpeg can read (MP4, MKV, MOV, AVI, WebM, TS, WMV, FLV, MP3, WAV, FLAC and more). File details and a real audio waveform are shown on a timeline.
 - **Trim** by typing start/end seconds, or click the timeline to set the start and right-click to set the end.
+- **See what you are cutting**: still frames at the start and end points, and a thumbnail that follows your mouse along the timeline.
 - **Convert** to MP4 (H.264 or H.265), MOV (H.264), WebM (VP9), or extract audio as MP3 or FLAC.
 - **Resize** to 720p, 1080p, 1440p or 4K (letterboxed to keep the aspect ratio), with optional Lanczos upscaling, sharpening and denoising.
 - **Rotate** 90° either way or 180°, **mute** or change the **volume**.
@@ -56,7 +57,7 @@ Settings and export logs are stored in `%APPDATA%\WaveForgeVideo`. Set the `WAVE
 ## Limitations
 
 - It works on one clip at a time: there is no multi-clip timeline, cutting out the middle of a clip, transitions, titles or colour grading.
-- There is no built-in video player. *Play in default player* opens the original file in your system player.
+- There is no built-in video player: the previews are still frames. *Play in default player* opens the original file in your system player.
 - Trimming re-encodes the video, so it is not instant and not lossless.
 - Developed and tested on Windows 11. It uses only Tk and Python's standard library, so it may run on Linux or macOS, but that has not been tried.
 

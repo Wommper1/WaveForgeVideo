@@ -10,7 +10,8 @@ WaveForge Video needs FFmpeg. If the ENGINE panel says it was not found, run `wi
 |------|--------------|
 | **SOURCE** (top left) | Name, size, frame rate, codecs, container and duration of the loaded file. |
 | **EDIT** (left) | Trim start/end, mute, volume and rotation. |
-| **TIMELINE** (middle) | Audio waveform with a time ruler. The bright box is the part that will be kept. |
+| **FRAMES AT THE TRIM POINTS** (middle, top) | The video frame at the start and at the end of the part you are keeping. |
+| **TIMELINE** (middle) | Audio waveform with a time ruler. The bright box is the part that will be kept. Hover to preview any moment. |
 | **EXPORT / CONVERT** (right) | Preset, resolution, 4K enhancement, quality and the hardware-encoder switch. |
 | **QUICK CONVERT** | One-click shortcuts: MP4 1080p, upscale to 4K, extract MP3. |
 | **ENGINE** | Which FFmpeg is in use and which GPU encoders passed their startup test. |
@@ -21,6 +22,14 @@ WaveForge Video needs FFmpeg. If the ENGINE panel says it was not found, run `wi
 - Type seconds into **Trim start** and **Trim end** (decimals are fine, for example `12.5`). Leave **Trim end** blank to keep everything to the end.
 - Or use the timeline: **click** sets the start, **right-click** sets the end.
 - The time under the timeline shows `start – end / total`.
+
+### Seeing what you are cutting
+
+- The **START** and **END** panels show the picture at the two trim points. They update a moment after you change a trim value or the rotation (so they follow *Rotate* too). END shows the last frame that will be kept.
+- **Move the mouse over the timeline** to see a small thumbnail of that moment with its time. Click to make that moment the start, or right-click to make it the end.
+- The panels grow and shrink with the window. Frames you have already looked at are remembered, so moving back and forth is instant.
+- These are still pictures, not playback. For a real look at the clip use **Play in default player**.
+- Audio files and videos without a picture show "No video track" instead.
 
 Trimming re-encodes the video, so the cut is frame-accurate but takes as long as a normal export.
 

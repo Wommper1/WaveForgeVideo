@@ -303,6 +303,194 @@ def test_partial_path_keeps_the_extension():
     assert wf.partial_path("clip.v2.mov") == "clip.v2.part.mov"
 
 
+# ----------------------------------------------------------------- frame previews
+
+@pytest.mark.parametrize("t,duration,expected", [
+    (3.0, 10.0, 3.0),
+    (-1.0, 10.0, 0.0),
+    (10.0, 10.0, 9.95),   # the very end of a file has no frame, so stay just inside it
+    (99.0, 10.0, 9.95),
+    (5.0, 0.0, 5.0),      # unknown duration: leave the time alone
+    (0.0, 0.01, 0.0),
+])
+def test_preview_time(t, duration, expected):
+    assert wf.preview_time(t, duration) == pytest.approx(expected)
+
+
+def fake_run(captured, stdout=b"\x89PNG\r\n\x1a\nimage data", returncode=0):
+    def run(cmd, **kwargs):
+        captured.append((cmd, kwargs))
+        return subprocess.CompletedProcess(cmd, returncode, stdout, b"")
+    return run
+
+
+def test_grab_frame_builds_a_single_frame_png_command(monkeypatch):
+    captured = []
+    monkeypatch.setattr(wf.subprocess, "run", fake_run(captured))
+    png = wf.grab_frame("ffmpeg", "in.mp4", 12.3456, "90° clockwise", (300, 169))
+    cmd = captured[0][0]
+    assert png.startswith(b"\x89PNG")
+    assert cmd[cmd.index("-ss") + 1] == "12.346"
+    assert cmd[cmd.index("-frames:v") + 1] == "1"
+    assert cmd[cmd.index("-i") + 1] == "in.mp4"
+    vf = cmd[cmd.index("-vf") + 1]
+    assert vf == "transpose=1,scale=300:169:force_original_aspect_ratio=decrease"
+    assert cmd[-1] == "-" and "image2pipe" in cmd and "-an" in cmd
+
+
+def test_grab_frame_without_rotation_only_scales(monkeypatch):
+    captured = []
+    monkeypatch.setattr(wf.subprocess, "run", fake_run(captured))
+    wf.grab_frame("ffmpeg", "in.mp4", 0, "None", (160, 90))
+    cmd = captured[0][0]
+    assert cmd[cmd.index("-vf") + 1] == "scale=160:90:force_original_aspect_ratio=decrease"
+    assert cmd[cmd.index("-ss") + 1] == "0.000"
+
+
+def test_grab_frame_returns_empty_when_nothing_usable(monkeypatch):
+    monkeypatch.setattr(wf.subprocess, "run", fake_run([], stdout=b"\x89PNG..", returncode=1))
+    assert wf.grab_frame("ffmpeg", "in.mp4", 1) == b""                      # ffmpeg failed
+    monkeypatch.setattr(wf.subprocess, "run", fake_run([], stdout=b""))
+    assert wf.grab_frame("ffmpeg", "in.mp4", 1) == b""                      # no frame decoded (seek past the end)
+    monkeypatch.setattr(wf.subprocess, "run", fake_run([], stdout=b"not a png"))
+    assert wf.grab_frame("ffmpeg", "in.mp4", 1) == b""                      # not an image
+
+    def hang(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 1)
+    monkeypatch.setattr(wf.subprocess, "run", hang)
+    assert wf.grab_frame("ffmpeg", "in.mp4", 1) == b""
+
+    def missing(cmd, **kwargs):
+        raise FileNotFoundError
+    monkeypatch.setattr(wf.subprocess, "run", missing)
+    assert wf.grab_frame("ffmpeg", "in.mp4", 1) == b""
+
+
+class Recorder:
+    """Collects FrameLoader deliveries so a test can wait for them."""
+
+    def __init__(self):
+        self.items = []
+        self.cond = threading.Condition()
+
+    def __call__(self, slot, ticket, key, data):
+        with self.cond:
+            self.items.append((slot, ticket, key, data))
+            self.cond.notify_all()
+
+    def wait_for(self, count, timeout=10):
+        with self.cond:
+            assert self.cond.wait_for(lambda: len(self.items) >= count, timeout), f"only {len(self.items)} of {count} deliveries"
+        return list(self.items)
+
+
+def test_frame_loader_delivers_the_requested_frame():
+    got = Recorder()
+    loader = wf.FrameLoader(lambda *key: b"png:" + repr(key).encode(), got)
+    ticket = loader.request("start", ("a.mp4", 1.5))
+    (slot, n, key, data), = got.wait_for(1)
+    assert (slot, n, key) == ("start", ticket, ("a.mp4", 1.5))
+    assert data == b"png:" + repr(("a.mp4", 1.5)).encode()
+    assert loader.current("start", ticket)
+
+
+def test_frame_loader_keeps_only_the_newest_request_per_slot():
+    release, started = threading.Event(), threading.Event()
+    grabbed = []
+
+    def grab(name, t):
+        grabbed.append((name, t))
+        started.set()
+        release.wait(10)
+        return b"x"
+
+    got = Recorder()
+    loader = wf.FrameLoader(grab, got)
+    loader.request("hover", ("a", 1))
+    assert started.wait(10)                    # the first request is now running and blocked
+    stale = loader.request("hover", ("a", 2))  # superseded before it ever starts
+    newest = loader.request("hover", ("a", 3))
+    release.set()
+    deliveries = got.wait_for(2)
+    assert grabbed == [("a", 1), ("a", 3)]     # the middle request was never fetched
+    assert not loader.current("hover", stale) and loader.current("hover", newest)
+    assert [d[2] for d in deliveries] == [("a", 1), ("a", 3)]
+    assert not loader.current("hover", deliveries[0][1])  # the running one was superseded too, so the UI drops it
+
+
+def test_frame_loader_slots_do_not_cancel_each_other():
+    got = Recorder()
+    loader = wf.FrameLoader(lambda *key: b"x", got)
+    a = loader.request("start", ("a", 1))
+    b = loader.request("end", ("a", 2))
+    got.wait_for(2)
+    assert loader.current("start", a) and loader.current("end", b)
+
+
+def test_frame_loader_cancel_makes_results_stale():
+    release, started = threading.Event(), threading.Event()
+
+    def grab(*key):
+        started.set()
+        release.wait(10)
+        return b"x"
+
+    got = Recorder()
+    loader = wf.FrameLoader(grab, got)
+    ticket = loader.request("hover", ("a", 1))
+    assert started.wait(10)
+    loader.cancel("hover")
+    release.set()
+    got.wait_for(1)
+    assert not loader.current("hover", ticket)
+
+
+def test_frame_loader_serves_repeats_from_cache():
+    calls = []
+    got = Recorder()
+    loader = wf.FrameLoader(lambda *key: calls.append(key) or b"x", got)
+    loader.request("start", ("a", 1))
+    got.wait_for(1)
+    loader.request("end", ("a", 1))            # same frame, different slot
+    got.wait_for(2)
+    assert calls == [("a", 1)]
+    loader.clear_cache()
+    loader.request("start", ("a", 1))
+    got.wait_for(3)
+    assert calls == [("a", 1), ("a", 1)]
+
+
+def test_frame_loader_cache_is_bounded_and_forgets_the_oldest():
+    calls = []
+    got = Recorder()
+    loader = wf.FrameLoader(lambda *key: calls.append(key) or b"x", got, cache_size=2)
+    for i in range(3):
+        loader.request("hover", ("a", i))
+        got.wait_for(i + 1)
+    loader.request("hover", ("a", 2))          # still cached
+    loader.request("hover", ("a", 0))          # evicted, so fetched again
+    got.wait_for(5)
+    assert calls == [("a", 0), ("a", 1), ("a", 2), ("a", 0)]
+
+
+def test_frame_loader_does_not_cache_failures_and_survives_errors():
+    attempts = []
+
+    def grab(*key):
+        attempts.append(key)
+        if len(attempts) == 1:
+            raise RuntimeError("boom")
+        return b"" if len(attempts) == 2 else b"good"
+
+    got = Recorder()
+    loader = wf.FrameLoader(grab, got)
+    for i in range(3):
+        loader.request("start", ("a", 1))
+        got.wait_for(i + 1)
+    assert [d[3] for d in got.items] == [b"", b"", b"good"]   # an exception and an empty result both deliver b""
+    assert len(attempts) == 3                                  # and neither was cached
+
+
 # --------------------------------------------------------------------- export worker
 
 def py(code):
