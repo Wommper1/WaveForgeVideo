@@ -1,5 +1,5 @@
 from __future__ import annotations
-import array, collections, json, os, queue, shutil, subprocess, sys, threading, time
+import array, collections, json, os, queue, shutil, signal, subprocess, sys, threading, time
 from dataclasses import dataclass
 from pathlib import Path
 import tkinter as tk
@@ -23,6 +23,8 @@ MEDIA_FILETYPES = [("Video and audio"," ".join("*"+e for e in sorted(VIDEO_EXTS|
 
 # Keeps ffmpeg/ffprobe from flashing a console window when the app runs without one.
 _NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+# Outside Windows an export runs in its own process group so cancelling can stop all of it.
+_OWN_GROUP = {} if os.name == "nt" else {"start_new_session": True}
 
 @dataclass
 class MediaInfo:
@@ -203,6 +205,23 @@ def same_file(a, b):
     except OSError:
         return os.path.normcase(os.path.abspath(a))==os.path.normcase(os.path.abspath(b))
 
+def kill_process_tree(proc):
+    """Stop `proc` and everything it started.
+
+    FFmpeg installed through a launcher shim (Chocolatey, Scoop) is a small exe whose real
+    ffmpeg.exe runs as a child, so terminating only the launcher would leave the encode going.
+    """
+    if proc.poll() is not None:return
+    try:
+        if os.name=="nt":
+            subprocess.run(["taskkill","/F","/T","/PID",str(proc.pid)],capture_output=True,**_NO_WINDOW)
+        else:
+            os.killpg(proc.pid,signal.SIGTERM)  # the process was started in its own group
+    except OSError:pass
+    if proc.poll() is None:
+        try:proc.terminate()
+        except OSError:pass
+
 def partial_path(output):
     """Temporary name used while exporting, so an existing file is only replaced by a finished one."""
     p=Path(output)
@@ -218,9 +237,7 @@ class Job:
 
     def cancel(self):
         self.cancelled=True
-        if self.proc and self.proc.poll() is None:
-            try:self.proc.terminate()
-            except OSError:pass
+        if self.proc:kill_process_tree(self.proc)
 
     def discard_partial(self):
         if self.work_path!=self.output:
@@ -620,7 +637,7 @@ class App(tk.Tk):
 
     def _run_ffmpeg(self,job,cmd):
         """Run one ffmpeg process, feeding the progress bar; returns (returncode, stderr tail)."""
-        proc=job.proc=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,encoding="utf-8",errors="replace",bufsize=1,**_NO_WINDOW)
+        proc=job.proc=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,encoding="utf-8",errors="replace",bufsize=1,**_NO_WINDOW,**_OWN_GROUP)
         if job.cancelled:job.cancel()  # cancelled before the process existed
         err_lines=collections.deque(maxlen=2000)
         # stderr has to be drained while ffmpeg runs, or a full pipe stalls the encode

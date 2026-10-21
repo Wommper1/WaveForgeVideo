@@ -400,6 +400,21 @@ def test_cancelled_export_discards_partial_file(make_app, temp_dir):
     assert not part.exists() and not out.exists()
 
 
+def test_cancel_also_stops_child_processes(make_app):
+    # FFmpeg installed through a Chocolatey/Scoop shim is a launcher with the real encoder as a
+    # child. Stopping only the launcher leaves the child holding the pipes, so the export never ends.
+    child = "import time; print('started', flush=True); time.sleep(60)"
+    launcher = f"import subprocess, sys; subprocess.run([sys.executable, '-c', {child!r}])"
+    app = make_app()
+    job = Job(py(launcher), "out.mp4", "shim", total=1.0)
+    t = threading.Thread(target=lambda: app._run_ffmpeg(job, job.cmd), daemon=True)
+    t.start()
+    threading.Event().wait(2)  # let the child start
+    job.cancel()
+    t.join(20)
+    assert not t.is_alive(), "cancel left the child process running"
+
+
 def test_old_logs_are_pruned(temp_dir):
     log_dir = temp_dir / "logs"
     log_dir.mkdir()
