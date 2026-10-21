@@ -48,7 +48,10 @@ def app(ffmpeg_tools, monkeypatch):
     try:
         window = wf.App()
     except tk.TclError as e:
-        pytest.skip(f"no display available: {e}")
+        # Only skip when Tk itself cannot run here; any other TclError is a bug in the window code.
+        if "display" in str(e) or "init.tcl" in str(e):
+            pytest.skip(f"Tk is not usable here: {e}")
+        raise
     try:
         window.attributes("-alpha", 0.0)  # fully transparent, so nothing flashes on screen while testing
     except tk.TclError:
