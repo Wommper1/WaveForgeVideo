@@ -1,8 +1,12 @@
 # WaveForge Video
 
+[Project case study](CASE_STUDY.md) · [Meet Alex Shade](https://github.com/Wommper1) · [The Level Everything Company](https://leveleverythingcompany.github.io/)
+
 A small Windows desktop app for trimming, converting, rotating and upscaling video. It is a friendly front-end for [FFmpeg](https://ffmpeg.org): you pick a clip, set the range you want, choose a format, and it does the work.
 
 ![WaveForge Video main window](docs/screenshot.png)
+
+**Current release:** [v1.1.0 for Windows](https://github.com/Wommper1/WaveForgeVideo/releases/tag/v1.1.0). Developed and tested on Windows 11; FFmpeg must be installed separately.
 
 ## Features
 
@@ -60,6 +64,10 @@ Settings and export logs are stored in `%APPDATA%\WaveForgeVideo`. Set the `WAVE
 - There is no built-in video player: the previews are still frames. *Play in default player* opens the original file in your system player.
 - Trimming re-encodes the video, so it is not instant and not lossless.
 - Developed and tested on Windows 11. It uses only Tk and Python's standard library, so it may run on Linux or macOS, but that has not been tried.
+
+## Feedback and contribution
+
+[Report a problem or suggest a feature](REPORTING.md). Include the version and steps to reproduce; remove private filenames and logs. Code contributions are described in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Development
 
